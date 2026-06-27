@@ -12,12 +12,18 @@ ways so we can compare them:
   - PR Z: JWT (stateless, signed token, no server state)
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
+import secrets
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Cookie
+from sqlalchemy.orm import Session as DBSession
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
-from .models import User
+from .models import User, Session
 from .database import get_db
+
+SESSION_COOKIE = "vault_session"
+SESSION_TTL = timedelta(days=7)
 
 router = APIRouter()
 
@@ -43,7 +49,7 @@ class LoginRequest(BaseModel):
 
 
 @router.post("/api/auth/register")
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+def register(payload: RegisterRequest, db: DBSession = Depends(get_db)):
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
@@ -55,37 +61,68 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/api/auth/login")
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, response: Response, db: DBSession = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    # TODO(auth-mechanism): issue a real credential here.
-    #   PR Y will create a server-side session + set a cookie.
-    #   PR Z will sign and return a JWT.
-    token = issue_token(user)
-    return {"token": token}
+    # Create a server-side session and hand the client an opaque cookie.
+    sess = issue_session(user, db)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=sess.id,
+        httponly=True,      # JS can't read it -> mitigates XSS token theft
+        secure=True,        # only sent over HTTPS
+        samesite="lax",
+        max_age=int(SESSION_TTL.total_seconds()),
+    )
+    return {"status": "logged in"}
 
 
-# --- STUBS to be implemented by the chosen auth strategy (PR Y or PR Z) ---
+@router.post("/api/auth/logout")
+def logout(
+    response: Response,
+    db: DBSession = Depends(get_db),
+    vault_session: str | None = Cookie(default=None),
+):
+    # Server-side revocation: just delete the session row. Instantly invalid.
+    if vault_session:
+        db.query(Session).filter(Session.id == vault_session).delete()
+        db.commit()
+    response.delete_cookie(SESSION_COOKIE)
+    return {"status": "logged out"}
 
-def issue_token(user: User) -> str:
-    """Issue a credential for a freshly-authenticated user.
 
-    STUB — returns a placeholder. Real implementation comes in PR Y / PR Z.
+# --- Session-based auth implementation (PR Y) ---
+
+def issue_session(user: User, db: DBSession) -> Session:
+    """Create a server-side session row with a random opaque id."""
+    sess = Session(
+        id=secrets.token_urlsafe(32),
+        user_id=user.id,
+        expires_at=datetime.utcnow() + SESSION_TTL,
+    )
+    db.add(sess)
+    db.commit()
+    db.refresh(sess)
+    return sess
+
+
+def get_current_user(
+    db: DBSession = Depends(get_db),
+    vault_session: str | None = Cookie(default=None),
+) -> User:
+    """Resolve the user by looking up their session in the DB.
+
+    Every request costs one DB lookup, but revocation is instant and we can
+    list/kill active sessions per user.
     """
-    return f"placeholder-token-for-user-{user.id}"
-
-
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
-    """Resolve the authenticated user for a request.
-
-    STUB — currently trusts an `X-User-Id` header so the rest of the app can be
-    wired up. This is NOT secure and must be replaced by PR Y / PR Z.
-    """
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
+    if not vault_session:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    user = db.query(User).filter(User.id == int(user_id)).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return user
+    sess = db.query(Session).filter(Session.id == vault_session).first()
+    if not sess:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    if sess.expires_at < datetime.utcnow():
+        db.delete(sess)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Session expired")
+    return sess.user

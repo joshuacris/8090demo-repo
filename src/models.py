@@ -5,6 +5,18 @@ from datetime import datetime
 Base = declarative_base()
 
 
+class Session(Base):
+    """Server-side session. The session id (a random opaque token) is stored in a
+    cookie on the client; the source of truth lives here in the DB."""
+
+    __tablename__ = "sessions"
+    id = Column(String(64), primary_key=True)  # opaque random token
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    user = relationship("User")
+
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
