@@ -12,12 +12,20 @@ ways so we can compare them:
   - PR Z: JWT (stateless, signed token, no server state)
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from datetime import datetime, timedelta
+
+import jwt
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from .models import User
+from .config import settings
 from .database import get_db
+
+ACCESS_TTL = timedelta(minutes=15)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 router = APIRouter()
 
@@ -59,33 +67,45 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    # TODO(auth-mechanism): issue a real credential here.
-    #   PR Y will create a server-side session + set a cookie.
-    #   PR Z will sign and return a JWT.
+    # Sign a stateless JWT. No server-side record is kept.
     token = issue_token(user)
-    return {"token": token}
+    return {"access_token": token, "token_type": "bearer"}
 
 
-# --- STUBS to be implemented by the chosen auth strategy (PR Y or PR Z) ---
+# --- JWT-based auth implementation (PR Z) ---
 
 def issue_token(user: User) -> str:
-    """Issue a credential for a freshly-authenticated user.
+    """Sign a short-lived JWT carrying the user id. Stateless: nothing stored."""
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(user.id),
+        "iat": now,
+        "exp": now + ACCESS_TTL,
+    }
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
-    STUB — returns a placeholder. Real implementation comes in PR Y / PR Z.
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    """Resolve the user by verifying the JWT signature. No DB lookup for the
+    token itself — only to load the user object. Fully stateless and horizontally
+    scalable, but tokens can't be revoked before they expire.
     """
-    return f"placeholder-token-for-user-{user.id}"
-
-
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
-    """Resolve the authenticated user for a request.
-
-    STUB — currently trusts an `X-User-Id` header so the rest of the app can be
-    wired up. This is NOT secure and must be replaced by PR Y / PR Z.
-    """
-    user_id = request.headers.get("X-User-Id")
-    if not user_id:
+    if creds is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    user = db.query(User).filter(User.id == int(user_id)).first()
+    try:
+        payload = jwt.decode(
+            creds.credentials,
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user
