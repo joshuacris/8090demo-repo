@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from .models import Task, TaskStatus, Sprint
+from .cache import invalidate_team
 from .database import get_db
 
 router = APIRouter()
@@ -35,6 +36,8 @@ def create_task(payload: TaskCreate, db: Session = Depends(get_db)):
     db.add(task)
     db.commit()
     db.refresh(task)
+    # New task affects workload and status_breakdown
+    invalidate_team(task.sprint.team_id, ["status_breakdown", "workload"])
     return task
 
 
@@ -46,6 +49,9 @@ def update_task(task_id: int, payload: TaskUpdate, db: Session = Depends(get_db)
     for field, value in payload.dict(exclude_unset=True).items():
         setattr(task, field, value)
     db.commit()
+    # Invalidate dashboard cache — status_breakdown and workload change on any task mutation
+    # Velocity only changes on status->DONE, but invalidate it too for simplicity
+    invalidate_team(task.sprint.team_id, ["status_breakdown", "workload", "velocity"])
     return task
 
 
