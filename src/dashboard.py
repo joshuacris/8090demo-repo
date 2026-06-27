@@ -1,8 +1,8 @@
-"""Dashboard endpoint — the slow one. Joins 4 tables, computes aggregations on every request."""
+"""Dashboard endpoint — optimized with materialized views and denormalized team_id."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case
+from sqlalchemy import func, case, text
 from datetime import datetime, timedelta
 from .models import Task, Sprint, User, Team, TaskStatus
 from .database import get_db
@@ -12,7 +12,7 @@ router = APIRouter()
 
 @router.get("/api/dashboard/{team_id}")
 def get_dashboard(team_id: int, db: Session = Depends(get_db)):
-    """Returns full dashboard payload. Currently 4–8s on large teams."""
+    """Returns full dashboard payload. Optimized via materialized view + denormalized team_id."""
 
     team = db.query(Team).filter(Team.id == team_id).first()
     if not team:
@@ -26,80 +26,59 @@ def get_dashboard(team_id: int, db: Session = Depends(get_db)):
         .first()
     )
 
-    # --- EXPENSIVE: task status breakdown (joins tasks + sprint + users) ---
-    status_counts = (
-        db.query(Task.status, func.count(Task.id))
-        .join(Sprint, Task.sprint_id == Sprint.id)
-        .filter(Sprint.team_id == team_id)
-        .group_by(Task.status)
-        .all()
+    # --- FAST: status breakdown + velocity from materialized view ---
+    stats = db.execute(
+        text("""
+            SELECT todo_count, in_progress_count, in_review_count, done_count, blocked_count,
+                   completed_points, total_points, avg_cycle_time_hours,
+                   sprint_name
+            FROM mv_team_dashboard_stats
+            WHERE team_id = :tid
+            ORDER BY end_date DESC
+            LIMIT 5
+        """),
+        {"tid": team_id},
+    ).fetchall()
+
+    # Current sprint status breakdown (most recent)
+    current = stats[0] if stats else None
+    status_breakdown = {
+        "todo": current.todo_count if current else 0,
+        "in_progress": current.in_progress_count if current else 0,
+        "in_review": current.in_review_count if current else 0,
+        "done": current.done_count if current else 0,
+        "blocked": current.blocked_count if current else 0,
+    }
+
+    # --- FAST: velocity from same materialized view (already fetched) ---
+    velocity = [
+        {"sprint": s.sprint_name, "completed": s.completed_points, "total": s.total_points}
+        for s in stats
+    ]
+
+    # --- FAST: cycle time from materialized view ---
+    avg_cycle_hours = (
+        round(current.avg_cycle_time_hours, 1)
+        if current and current.avg_cycle_time_hours
+        else 0
     )
 
-    # --- EXPENSIVE: velocity over last 5 sprints ---
-    recent_sprints = (
-        db.query(Sprint)
-        .filter(Sprint.team_id == team_id)
-        .order_by(Sprint.end_date.desc())
-        .limit(5)
-        .all()
-    )
-
-    velocity = []
-    for sprint in recent_sprints:
-        completed_points = (
-            db.query(func.sum(Task.story_points))
-            .filter(Task.sprint_id == sprint.id, Task.status == TaskStatus.DONE)
-            .scalar()
-            or 0
-        )
-        total_points = (
-            db.query(func.sum(Task.story_points)).filter(Task.sprint_id == sprint.id).scalar() or 0
-        )
-        velocity.append(
-            {"sprint": sprint.name, "completed": completed_points, "total": total_points}
-        )
-
-    # --- EXPENSIVE: cycle time (avg time from in_progress to done, last 30 days) ---
-    thirty_days_ago = now - timedelta(days=30)
-    cycle_time_tasks = (
-        db.query(Task)
-        .join(Sprint, Task.sprint_id == Sprint.id)
-        .filter(
-            Sprint.team_id == team_id,
-            Task.status == TaskStatus.DONE,
-            Task.completed_at >= thirty_days_ago,
-        )
-        .all()
-    )
-
-    if cycle_time_tasks:
-        total_cycle = sum(
-            (t.completed_at - t.updated_at).total_seconds()
-            for t in cycle_time_tasks
-            if t.completed_at and t.updated_at
-        )
-        avg_cycle_hours = (total_cycle / len(cycle_time_tasks)) / 3600
-    else:
-        avg_cycle_hours = 0
-
-    # --- EXPENSIVE: overdue tasks ---
+    # --- Overdue tasks (still hits DB but uses denormalized team_id — no join) ---
     overdue = (
         db.query(Task)
-        .join(Sprint, Task.sprint_id == Sprint.id)
         .filter(
-            Sprint.team_id == team_id,
-            Sprint.end_date < now,
+            Task.team_id == team_id,
+            Task.sprint.has(Sprint.end_date < now),
             Task.status != TaskStatus.DONE,
         )
         .count()
     )
 
-    # --- EXPENSIVE: per-member workload ---
+    # --- Per-member workload (still ORM but uses denormalized team_id — no join) ---
     member_workload = (
         db.query(User.username, func.count(Task.id), func.sum(Task.story_points))
         .join(Task, User.id == Task.assignee_id)
-        .join(Sprint, Task.sprint_id == Sprint.id)
-        .filter(Sprint.team_id == team_id, Task.status.in_(["todo", "in_progress", "in_review"]))
+        .filter(Task.team_id == team_id, Task.status.in_(["todo", "in_progress", "in_review"]))
         .group_by(User.username)
         .all()
     )
@@ -107,9 +86,9 @@ def get_dashboard(team_id: int, db: Session = Depends(get_db)):
     return {
         "team": team.name,
         "current_sprint": current_sprint.name if current_sprint else None,
-        "status_breakdown": {str(s): c for s, c in status_counts},
+        "status_breakdown": status_breakdown,
         "velocity": velocity,
-        "avg_cycle_time_hours": round(avg_cycle_hours, 1),
+        "avg_cycle_time_hours": avg_cycle_hours,
         "overdue_tasks": overdue,
         "member_workload": [
             {"member": m, "active_tasks": c, "story_points": sp} for m, c, sp in member_workload
