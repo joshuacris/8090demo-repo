@@ -60,9 +60,11 @@ class Task(Base):
     priority = Column(Enum(Priority), default=Priority.MEDIUM)
     assignee_id = Column(Integer, ForeignKey("users.id"))
     sprint_id = Column(Integer, ForeignKey("sprints.id"))
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)  # denormalized for dashboard perf
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
     story_points = Column(Integer, default=1)
     assignee = relationship("User", back_populates="assigned_tasks")
     sprint = relationship("Sprint", back_populates="tasks")
+    team = relationship("Team")

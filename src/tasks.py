@@ -32,6 +32,9 @@ class TaskUpdate(BaseModel):
 @router.post("/api/tasks")
 def create_task(payload: TaskCreate, db: Session = Depends(get_db)):
     task = Task(**payload.dict())
+    # Denormalized team_id — must be set from sprint
+    sprint = db.query(Sprint).filter(Sprint.id == payload.sprint_id).first()
+    task.team_id = sprint.team_id
     db.add(task)
     db.commit()
     db.refresh(task)
