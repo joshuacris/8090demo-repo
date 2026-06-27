@@ -1,10 +1,11 @@
-"""Note CRUD endpoints."""
+"""Note CRUD endpoints — now scoped to the authenticated user."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
-from .models import Note
+from .models import Note, User
+from .auth import get_current_user
 from .database import get_db
 
 router = APIRouter()
@@ -21,8 +22,12 @@ class NoteUpdate(BaseModel):
 
 
 @router.post("/api/notes")
-def create_note(payload: NoteCreate, db: Session = Depends(get_db)):
-    note = Note(**payload.dict())
+def create_note(
+    payload: NoteCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    note = Note(**payload.dict(), owner_id=user.id)
     db.add(note)
     db.commit()
     db.refresh(note)
@@ -30,21 +35,38 @@ def create_note(payload: NoteCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/api/notes")
-def list_notes(db: Session = Depends(get_db)):
-    return db.query(Note).order_by(Note.created_at.desc()).all()
+def list_notes(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return (
+        db.query(Note)
+        .filter(Note.owner_id == user.id)
+        .order_by(Note.created_at.desc())
+        .all()
+    )
 
 
 @router.get("/api/notes/{note_id}")
-def get_note(note_id: int, db: Session = Depends(get_db)):
-    note = db.query(Note).filter(Note.id == note_id).first()
+def get_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user.id).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     return note
 
 
 @router.put("/api/notes/{note_id}")
-def update_note(note_id: int, payload: NoteUpdate, db: Session = Depends(get_db)):
-    note = db.query(Note).filter(Note.id == note_id).first()
+def update_note(
+    note_id: int,
+    payload: NoteUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user.id).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     for field, value in payload.dict(exclude_unset=True).items():
@@ -54,8 +76,12 @@ def update_note(note_id: int, payload: NoteUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/api/notes/{note_id}")
-def delete_note(note_id: int, db: Session = Depends(get_db)):
-    note = db.query(Note).filter(Note.id == note_id).first()
+def delete_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    note = db.query(Note).filter(Note.id == note_id, Note.owner_id == user.id).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     db.delete(note)
