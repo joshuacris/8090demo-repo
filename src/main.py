@@ -2,9 +2,11 @@
 
 from fastapi import FastAPI
 from .notes import router as notes_router
+from .auth import router as auth_router
 
-app = FastAPI(title="Vault API", version="0.1.0")
+app = FastAPI(title="Vault API", version="0.2.0")
 
+app.include_router(auth_router)
 app.include_router(notes_router)
 
 
