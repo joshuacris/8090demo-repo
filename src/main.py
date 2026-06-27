@@ -1,13 +1,11 @@
-"""TeamPulse API — main application."""
+"""Vault API — main application."""
 
 from fastapi import FastAPI
-from .dashboard import router as dashboard_router
-from .tasks import router as tasks_router
+from .notes import router as notes_router
 
-app = FastAPI(title="TeamPulse", version="1.0.0")
+app = FastAPI(title="Vault API", version="0.1.0")
 
-app.include_router(dashboard_router)
-app.include_router(tasks_router)
+app.include_router(notes_router)
 
 
 @app.get("/health")

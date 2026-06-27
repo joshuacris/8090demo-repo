@@ -1,24 +1,28 @@
-# TeamPulse
+# Vault API
 
-A team task management API built with FastAPI and PostgreSQL.
+A personal notes & secrets storage service built with FastAPI + PostgreSQL.
 
 ## Overview
 
-TeamPulse powers a project dashboard used by ~200 engineering teams internally. The API serves:
-- Task CRUD and assignment
-- Sprint board views with filters
-- Team analytics dashboard (velocity, burndown, cycle time)
-- Notification service for overdue tasks
+Vault lets users store private notes (passwords, API keys, personal info). Notes are
+encrypted at rest and scoped to the user who created them.
 
 ## Tech Stack
 - **Backend:** Python 3.12 / FastAPI
 - **Database:** PostgreSQL 15 with SQLAlchemy ORM
-- **Cache:** None currently (this is the problem)
-- **Auth:** JWT via middleware
-- **Deployment:** Docker + Kubernetes on AWS EKS
+- **Auth:** _none yet — see open PRs_
 
-## Known Issues
-- **Dashboard load time is 4–8 seconds** on teams with >500 tasks — the #1 user complaint
-- The analytics queries join 4 tables and run expensive aggregations on every page load
-- No caching layer exists; every request hits the DB directly
-- The `GET /api/dashboard/{team_id}` endpoint is the bottleneck
+## Status
+- ✅ Note CRUD (create / read / update / delete)
+- ⬜ **Authentication** — currently every request is anonymous and notes aren't scoped to a
+  real user. This is the next big piece (see PR X) and the two competing follow-ups for how
+  to handle sessions (PR Y vs PR Z).
+
+## Endpoints
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/notes` | Create a note |
+| `GET` | `/api/notes/{id}` | Get a note |
+| `GET` | `/api/notes` | List notes |
+| `PUT` | `/api/notes/{id}` | Update a note |
+| `DELETE` | `/api/notes/{id}` | Delete a note |
